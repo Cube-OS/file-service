@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::net::UdpSocket;
+use notify::{Watcher, RecursiveMode, PollWatcher, EventKind, Event};
 
 // We need this in this lib.rs file so we can build integration tests
 pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
@@ -104,16 +105,15 @@ pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
     info!("Hash Chunk Size {}", hash_chunk_size);
 
     let f_config = FileProtocolConfig::new(
-        prefix,
-        transfer_chunk_size,
+        prefix.clone(),
+        transfer_chunk_size.clone(),
         hold_count,
         inter_chunk_delay,
         max_chunks_transmit,
-        hash_chunk_size,
+        hash_chunk_size.clone(),
     );
 
     // Listen on UDP port
-    // let c_protocol = cbor_protocol::Protocol::new(&host.clone(), transfer_chunk_size);
     let host_socket = UdpSocket::bind(host.clone())?;
 
     let timeout = config
@@ -126,88 +126,131 @@ pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
     // Create thread sharable wrapper
     let threads = Arc::new(Mutex::new(raw_threads));
 
-    loop {
-        let mut buf = vec![0; hash_chunk_size];
-        let (_source, first_message) = match host_socket.recv_from(&mut buf) {
-            Ok((size, source)) => {
-                buf.truncate(size);
-                (source, buf)
-            }
-            Err(e) => {
-                warn!("Error receiving message: {:?}", e);
-                continue;
-            }
-        };
+    let stored_files = Arc::new(Mutex::new(HashMap::new()));
+    let stored_files_clone = Arc::clone(&stored_files);
 
-        let config_ref = f_config.clone();
-        let host_ref = host_ip.clone();
-        let timeout_ref = timeout;
+    let protocol_loop = thread::spawn(move || {
 
-        let channel_id = match file_protocol::parse_channel_id(&first_message) {
-            Ok(channel_id) => channel_id,
-            Err(e) => {
-                warn!("Error parsing channel ID: {:?}", e);
-                continue;
-            }
-        };
 
-        if !threads
-            .lock()
-            .map_err(|err| {
-                error!("Failed to get threads mutex: {:?}", err);
-                err
-            })
-            .unwrap()
-            .contains_key(&channel_id)
-        {
-            let (sender, receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
-                mpsc::channel();
-
-            threads
+        loop {
+            let mut buf = vec![0; hash_chunk_size];
+            let (_source, first_message) = match host_socket.recv_from(&mut buf) {
+                Ok((size, source)) => {
+                    buf.truncate(size);
+                    (source, buf)
+                }
+                Err(e) => {
+                    warn!("Error receiving message: {:?}", e);
+                    continue;
+                }
+            };
+    
+            let config_ref = f_config.clone();
+            let host_ref = host_ip.clone();
+            let timeout_ref = timeout;
+    
+            let channel_id = match file_protocol::parse_channel_id(&first_message) {
+                Ok(channel_id) => channel_id,
+                Err(e) => {
+                    warn!("Error parsing channel ID: {:?}", e);
+                    continue;
+                }
+            };
+    
+            if !threads
                 .lock()
                 .map_err(|err| {
                     error!("Failed to get threads mutex: {:?}", err);
                     err
                 })
                 .unwrap()
-                .insert(channel_id, sender.clone());
-
-            // Break the processing work off into its own thread so we can
-            // listen for requests from other clients
-            let shared_threads = threads.clone();
-            let downlink_ip_ref = downlink_ip.to_owned();
-            thread::spawn(move || {
-                let state = State::Holding {
-                    count: 0,
-                    prev_state: Box::new(State::Done),
-                };
-
-                // Set up the file system processor with the reply socket information
-                let f_protocol = FileProtocol::new(
-                    &format!("{}:{}", host_ref, 0),
-                    &format!("{}:{}", downlink_ip_ref, downlink_port),
-                    config_ref,
-                    num_threads,
-                );
-
-                // Listen, process, and react to the remaining messages in the
-                // requested operation
-                if let Err(e) = f_protocol.message_engine(
-                    |d| match receiver.recv_timeout(d) {
-                        Ok(v) => Ok(v),
-                        Err(RecvTimeoutError::Timeout) => Err(ProtocolError::ReceiveTimeout),
-                        Err(e) => Err(ProtocolError::ReceiveError {
-                            err: format!("Error {:?}", e),
-                        }),
-                    },
-                    timeout_ref,
-                    &state,
-                ) {
-                    warn!("Encountered errors while processing transaction: {}", e);
+                .contains_key(&channel_id)
+            {
+                let (sender, receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
+                    mpsc::channel();
+    
+                threads
+                    .lock()
+                    .map_err(|err| {
+                        error!("Failed to get threads mutex: {:?}", err);
+                        err
+                    })
+                    .unwrap()
+                    .insert(channel_id, sender.clone());
+    
+                // Break the processing work off into its own thread so we can
+                // listen for requests from other clients
+                let shared_threads = threads.clone();
+                let downlink_ip_ref = downlink_ip.to_owned();
+                let clone_stored_files = Arc::clone(&stored_files);
+                thread::spawn(move || {
+                    let state = State::Holding {
+                        count: 0,
+                        prev_state: Box::new(State::Done),
+                    };
+    
+                    // Set up the file system processor with the reply socket information
+                    let f_protocol = FileProtocol::new(
+                        &format!("{}:{}", host_ref, 0),
+                        &format!("{}:{}", downlink_ip_ref, downlink_port),
+                        config_ref,
+                        num_threads,
+                        clone_stored_files,
+                    );
+    
+                    // Listen, process, and react to the remaining messages in the
+                    // requested operation
+                    if let Err(e) = f_protocol.message_engine(
+                        |d| match receiver.recv_timeout(d) {
+                            Ok(v) => Ok(v),
+                            Err(RecvTimeoutError::Timeout) => Err(ProtocolError::ReceiveTimeout),
+                            Err(e) => Err(ProtocolError::ReceiveError {
+                                err: format!("Error {:?}", e),
+                            }),
+                        },
+                        timeout_ref,
+                        &state,
+                    ) {
+                        warn!("Encountered errors while processing transaction: {}", e);
+                    }
+    
+                    // Remove ourselves from threads list if we are finished
+                    shared_threads
+                        .lock()
+                        .map_err(|err| {
+                            error!("Failed to get threads mutex: {:?}", err);
+                            err
+                        })
+                        .unwrap()
+                        .remove(&channel_id);
+                });
+            }
+    
+            if let Some(sender) = threads
+                .lock()
+                .map_err(|err| {
+                    error!("Failed to get threads mutex: {:?}", err);
+                    err
+                })
+                .unwrap()
+                .get(&channel_id)
+            {
+                if let Err(e) = sender.send(first_message) {
+                    warn!("Error when sending to channel {}: {:?}", channel_id, e);
                 }
-
-                // Remove ourselves from threads list if we are finished
-                shared_threads
+            }
+    
+            if !threads
+                .lock()
+                .map_err(|err| {
+                    error!("Failed to get threads mutex: {:?}", err);
+                    err
+                })
+                .unwrap()
+                .contains_key(&channel_id)
+            {
+                warn!("No sender found for {}", channel_id);
+                threads
                     .lock()
                     .map_err(|err| {
                         error!("Failed to get threads mutex: {:?}", err);
@@ -215,41 +258,51 @@ pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
                     })
                     .unwrap()
                     .remove(&channel_id);
-            });
-        }
-
-        if let Some(sender) = threads
-            .lock()
-            .map_err(|err| {
-                error!("Failed to get threads mutex: {:?}", err);
-                err
-            })
-            .unwrap()
-            .get(&channel_id)
-        {
-            if let Err(e) = sender.send(first_message) {
-                warn!("Error when sending to channel {}: {:?}", channel_id, e);
             }
         }
+    });
+    
+    let file_initialise_loop = thread::spawn(move || {
+        // Create a channel to receive events
+        let (tx, rx) = mpsc::channel(); 
 
-        if !threads
-            .lock()
-            .map_err(|err| {
-                error!("Failed to get threads mutex: {:?}", err);
-                err
-            })
-            .unwrap()
-            .contains_key(&channel_id)
-        {
-            warn!("No sender found for {}", channel_id);
-            threads
-                .lock()
-                .map_err(|err| {
-                    error!("Failed to get threads mutex: {:?}", err);
-                    err
-                })
-                .unwrap()
-                .remove(&channel_id);
-        }
-    }
+        let watcher_config = notify::Config::default()
+            .with_poll_interval(Duration::from_secs(10));
+
+        // Create a watcher object, delivering debounced events via the channel
+        let mut watcher = PollWatcher::new(tx, watcher_config).unwrap();
+
+        // Add a path to be watched. All files and directories at that path and below will be monitored for changes.
+        watcher.watch(std::path::Path::new("/home/kubos/download/"), RecursiveMode::Recursive).unwrap();
+
+        loop {
+            match rx.recv() {
+                Ok(Ok(event)) => {
+                    match event.kind {
+                        EventKind::Create(_) => {
+                            let path = event.paths[0].clone();
+                            // A new file was created, initialize it
+                            match file_protocol::storage::initialize_file(&prefix.as_ref().unwrap(), path.to_str().unwrap(), transfer_chunk_size, hash_chunk_size) {
+                                Ok((file_name, hash, num_chunks, mode)) => {
+                                    stored_files_clone.lock().unwrap().insert(
+                                        path.to_str().unwrap().to_string(),
+                                        (file_name, hash, num_chunks, mode),
+                                    );
+                                },
+                                Err(e) => println!("Error initializing file: {:?}", e),
+                            }
+                        },
+                        _ => {},
+                    } 
+                },
+                Ok(Err(e)) => println!("watch error: {:?}", e),
+                Err(e) => println!("watch error: {:?}", e),
+            }
+        }        
+    });
+
+    protocol_loop.join().unwrap();
+    file_initialise_loop.join().unwrap();
+
+    Ok(())
 }
