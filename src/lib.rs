@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::net::UdpSocket;
-use notify::{Watcher, RecursiveMode, watcher};
+use notify::{Watcher, RecursiveMode, PollWatcher, EventKind, Event};
 
 // We need this in this lib.rs file so we can build integration tests
 pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
@@ -127,7 +127,7 @@ pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
     let threads = Arc::new(Mutex::new(raw_threads));
 
     let stored_files = Arc::new(Mutex::new(HashMap::new()));
-    let stored_files_clone = stored_files.clone();
+    let stored_files_clone = Arc::clone(&stored_files);
 
     let protocol_loop = thread::spawn(move || {
 
@@ -182,7 +182,7 @@ pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
                 // listen for requests from other clients
                 let shared_threads = threads.clone();
                 let downlink_ip_ref = downlink_ip.to_owned();
-                let clone_stored_files = stored_files.clone();
+                let clone_stored_files = Arc::clone(&stored_files);
                 thread::spawn(move || {
                     let state = State::Holding {
                         count: 0,
@@ -266,24 +266,28 @@ pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
         // Create a channel to receive events
         let (tx, rx) = mpsc::channel(); 
 
+        let watcher_config = notify::Config::default()
+            .with_poll_interval(Duration::from_secs(10));
+
         // Create a watcher object, delivering debounced events via the channel
-        let mut watcher = watcher(tx, Duration::from_secs(10)).unwrap();
+        let mut watcher = PollWatcher::new(tx, watcher_config).unwrap();
 
         // Add a path to be watched. All files and directories at that path and below will be monitored for changes.
-        watcher.watch("/home/kubos/download/", RecursiveMode::Recursive).unwrap();
+        watcher.watch(std::path::Path::new("/home/kubos/download/"), RecursiveMode::Recursive).unwrap();
 
         loop {
             match rx.recv() {
-                Ok(event) => {
-                    match event {
-                        notify::DebouncedEvent::Create(path) => {
+                Ok(Ok(event)) => {
+                    match event.kind {
+                        EventKind::Create(_) => {
+                            let path = event.paths[0].clone();
                             // A new file was created, initialize it
                             match file_protocol::storage::initialize_file(&prefix.as_ref().unwrap(), path.to_str().unwrap(), transfer_chunk_size, hash_chunk_size) {
                                 Ok((file_name, hash, num_chunks, mode)) => {
                                     stored_files_clone.lock().unwrap().insert(
                                         path.to_str().unwrap().to_string(),
                                         (file_name, hash, num_chunks, mode),
-                                    ).unwrap();
+                                    );
                                 },
                                 Err(e) => println!("Error initializing file: {:?}", e),
                             }
@@ -291,6 +295,7 @@ pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
                         _ => {},
                     } 
                 },
+                Ok(Err(e)) => println!("watch error: {:?}", e),
                 Err(e) => println!("watch error: {:?}", e),
             }
         }        
