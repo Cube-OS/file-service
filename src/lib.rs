@@ -144,6 +144,7 @@ pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
                     continue;
                 }
             };
+            debug!("Received message from {}", _source);
     
             let config_ref = f_config.clone();
             let host_ref = host_ip.clone();
@@ -184,11 +185,12 @@ pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
                 let downlink_ip_ref = downlink_ip.to_owned();
                 let clone_stored_files = Arc::clone(&stored_files);
                 thread::spawn(move || {
+                    debug!("Starting new thread for channel {}", channel_id);
                     let state = State::Holding {
                         count: 0,
                         prev_state: Box::new(State::Done),
                     };
-    
+                    
                     // Set up the file system processor with the reply socket information
                     let f_protocol = FileProtocol::new(
                         &format!("{}:{}", host_ref, 0),
