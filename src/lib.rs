@@ -16,6 +16,7 @@
 
 #![allow(clippy::block_in_if_condition_stmt)]
 
+use log::debug;
 use file_protocol::{FileProtocol, FileProtocolConfig, ProtocolError, State};
 use kubos_system::Config as ServiceConfig;
 use log::{error, info, warn};
