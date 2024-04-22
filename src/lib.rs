@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::net::UdpSocket;
-use notify::{Watcher, RecursiveMode, PollWatcher, EventKind, Event};
+use notify::{Watcher, RecursiveMode, PollWatcher, EventKind};
 
 // We need this in this lib.rs file so we can build integration tests
 pub fn recv_loop(config: &ServiceConfig) -> Result<(), failure::Error> {
