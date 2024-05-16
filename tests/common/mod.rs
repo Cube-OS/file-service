@@ -16,10 +16,12 @@
 #![macro_use]
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use blake2_rfc::blake2s::Blake2s;
 use file_protocol::{FileProtocol, FileProtocolConfig, Message, ProtocolError, State};
 use std::fs::File;
 use std::io::prelude::*;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -73,7 +75,7 @@ pub fn download(
         (chunk_size as usize) * 2,
     );
     let f_protocol =
-        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1);
+        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1, Arc::new(Mutex::new(HashMap::new())),);
 
     let channel = f_protocol.generate_channel()?;
 
@@ -119,7 +121,7 @@ pub fn download_partial(
         (chunk_size as usize) * 2,
     );
     let f_protocol =
-        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1);
+        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1, Arc::new(Mutex::new(HashMap::new())),);
 
     let channel = f_protocol.generate_channel()?;
 
@@ -193,7 +195,7 @@ pub fn upload(
         (chunk_size as usize) * 2,
     );
     let f_protocol =
-        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1);
+        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1, Arc::new(Mutex::new(HashMap::new())),);
 
     // copy file to upload to temp storage. calculate the hash and chunk info
     let (_filename, hash, num_chunks, mode) = f_protocol.initialize_file(&source_path)?;
@@ -237,7 +239,7 @@ pub fn upload_partial(
         (chunk_size as usize) * 2,
     );
     let f_protocol =
-        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1);
+        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1, Arc::new(Mutex::new(HashMap::new())),);
 
     // Copy file to upload to temp storage. calculate the hash and chunk info
     let (_filename, hash, num_chunks, mode) = f_protocol.initialize_file(&source_path)?;
@@ -280,7 +282,7 @@ pub fn cleanup(
         (chunk_size as usize) * 2,
     );
     let f_protocol =
-        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1);
+        FileProtocol::new(&format!("{}:{}", host_ip, host_port), remote_addr, f_config, 1, Arc::new(Mutex::new(HashMap::new())),);
 
     let channel = f_protocol.generate_channel()?;
 
